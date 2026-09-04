@@ -1,0 +1,131 @@
+name: Build WIE Zenonia SVC 412 Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Build web frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout official WIE source
+        uses: actions/checkout@v7
+        with:
+          repository: dlunch/wie
+          ref: 47b41b55f5fcc3def406a51abe567ce71f5025d2
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+
+      - name: Set up Rust for WebAssembly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Build production frontend
+        run: |
+          npm ci
+          npm run build:prod
+
+      - name: Upload web frontend
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-frontend
+          path: wie-web/dist
+          if-no-files-found: error
+
+  windows:
+    name: Build patched Windows x64 installer
+    needs: web
+    runs-on: windows-latest
+    steps:
+      - name: Checkout official WIE source
+        uses: actions/checkout@v7
+        with:
+          repository: dlunch/wie
+          ref: 47b41b55f5fcc3def406a51abe567ce71f5025d2
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Apply experimental LGT SVC 412 patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          svc = Path('wie-lgt/src/runtime/svc_ids.rs')
+          text = svc.read_text(encoding='utf-8')
+          old = '    SelectRecord = 0x199,\n    Unk8 = 0x1a0,'
+          new = '''    SelectRecord = 0x199,
+              // Experimental LGT database slot 12 used by Zenonia 1.
+              ListDatabases = 0x19c,
+              Unk8 = 0x1a0,'''
+          if old not in text:
+              raise SystemExit('Could not find enum insertion point')
+          text = text.replace(old, new, 1)
+
+          old = '            0x199 => Self::SelectRecord,\n            0x1a0 => Self::Unk8,'
+          new = '''            0x199 => Self::SelectRecord,
+                      0x19c => Self::ListDatabases,
+                      0x1a0 => Self::Unk8,'''
+          if old not in text:
+              raise SystemExit('Could not find SVC mapping insertion point')
+          svc.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          wipi = Path('wie-lgt/src/runtime/wipi_c.rs')
+          text = wipi.read_text(encoding='utf-8')
+          old = '        WIPICSvcId::SelectRecord => database::select_record.into_body(),\n        WIPICSvcId::Unk8 => database::exists_database.into_body(),'
+          new = '''        WIPICSvcId::SelectRecord => database::select_record.into_body(),
+                  WIPICSvcId::ListDatabases => database::list_databases.into_body(),
+                  WIPICSvcId::Unk8 => database::exists_database.into_body(),'''
+          if old not in text:
+              raise SystemExit('Could not find dispatch insertion point')
+          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
+          print('Applied LGT SVC 412 (0x19c) experimental patch')
+          PY
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Download web frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: web-frontend
+          path: wie-web/dist
+
+      - name: Build unsigned Windows installer
+        uses: tauri-apps/tauri-action@v1
+        with:
+          projectPath: wie-app
+          args: >-
+            --config '{"build":{"beforeBuildCommand":""}}'
+            --ci --target x86_64-pc-windows-msvc --bundles nsis --no-sign
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $installer = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer was not produced" }
+          Copy-Item $installer.FullName "dist/WIE-Zenonia-SVC412-Test-windows-x86_64-unsigned-setup.exe"
+
+      - name: Upload Windows test build
+        uses: actions/upload-artifact@v7
+        with:
+          name: WIE-Zenonia-SVC412-Test-Windows
+          path: dist/*
+          if-no-files-found: error

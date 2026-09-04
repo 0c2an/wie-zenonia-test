@@ -1,4 +1,4 @@
-name: Build WIE Zenonia SVC 412 Test
+name: Build WIE Zenonia LGT Test v2
 
 on:
   workflow_dispatch:
@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - name: Apply experimental LGT SVC 412 patch
+      - name: Apply experimental LGT compatibility patches
         shell: bash
         run: |
           python - <<'PY'
@@ -94,6 +94,37 @@ jobs:
               raise SystemExit('Could not find dispatch insertion point')
           wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
           print('Applied LGT SVC 412 (0x19c) experimental patch')
+
+          # Zenonia proceeds past SVC 412, then reaches LGT SVC 0x12d.
+          # In upstream WIE this is `unk4` and currently returns 0.
+          # Zenonia treats the result as a pointer to a structure whose first
+          # field is a C-string pointer, then calls strstr(value, "/L")/"/S".
+          # Return a small, valid compatibility structure for the next test.
+          old = '''async fn unk4(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+              tracing::warn!("stub unk4({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+
+              Ok(0)
+          }'''
+          new = '''async fn unk4(context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+              tracing::warn!("experimental LGT 0x12d fs-info shim({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+
+              let path = b"/L";
+              let path_ptr = context.alloc_raw((path.len() + 1) as u32)?;
+              write_null_terminated_string_bytes(context, path_ptr, path)?;
+
+              // Zenonia currently reads the first word as a char*.
+              // Leave a little zeroed room for adjacent fields while the ABI
+              // is still being reverse engineered.
+              let info_ptr = context.alloc_raw(16)?;
+              context.write_bytes(info_ptr, &[0u8; 16])?;
+              write_generic(context, info_ptr, path_ptr)?;
+
+              Ok(info_ptr)
+          }'''
+          if old not in text:
+              raise SystemExit('Could not find LGT unk4/0x12d stub')
+          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
+          print('Applied experimental LGT SVC 0x12d compatibility shim')
           PY
 
       - name: Set up Rust
@@ -121,11 +152,11 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $installer = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer was not produced" }
-          Copy-Item $installer.FullName "dist/WIE-Zenonia-SVC412-Test-windows-x86_64-unsigned-setup.exe"
+          Copy-Item $installer.FullName "dist/WIE-Zenonia-LGT-Test-v2-windows-x86_64-unsigned-setup.exe"
 
       - name: Upload Windows test build
         uses: actions/upload-artifact@v7
         with:
-          name: WIE-Zenonia-SVC412-Test-Windows
+          name: WIE-Zenonia-LGT-Test-v2-Windows
           path: dist/*
           if-no-files-found: error

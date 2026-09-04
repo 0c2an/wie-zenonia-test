@@ -1,4 +1,4 @@
-name: Build WIE Zenonia LGT Test v2
+name: Build WIE Zenonia LGT Test v3
 
 on:
   workflow_dispatch:
@@ -33,6 +33,38 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
+
+      - name: Isolate v3 web storage
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path('wie-web/src/ts/app_library_store.ts'): [
+                  ('indexedDB.open("wie_app_library", 1)', 'indexedDB.open("wie_zenonia_v3_app_library", 1)'),
+              ],
+              Path('wie-web/src/ts/library.ts'): [
+                  ('const WELCOME_STORAGE_KEY = "wie_welcome_seen";', 'const WELCOME_STORAGE_KEY = "wie_zenonia_v3_welcome_seen";'),
+              ],
+              Path('wie-web/src/rust/filesystem.rs'): [
+                  ('const DB_NAME: &str = "wie_filesystem";', 'const DB_NAME: &str = "wie_zenonia_v3_filesystem";'),
+              ],
+              Path('wie-web/src/rust/database.rs'): [
+                  ('format!("wie_{app_id}")', 'format!("wie_zenonia_v3_{app_id}")'),
+              ],
+          }
+
+          for path, items in replacements.items():
+              data = path.read_text(encoding='utf-8')
+              for old, new in items:
+                  if old not in data:
+                      raise SystemExit(f'Could not find storage isolation target in {path}: {old}')
+                  data = data.replace(old, new)
+              path.write_text(data, encoding='utf-8')
+
+          print('Isolated v3 app library, icons/archive storage, filesystem, save DBs, and welcome state')
+          PY
 
       - name: Build production frontend
         run: |
@@ -127,6 +159,25 @@ jobs:
           print('Applied experimental LGT SVC 0x12d compatibility shim')
           PY
 
+
+      - name: Isolate v3 Windows app identity
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          path = Path('wie-app/tauri.conf.json')
+          config = json.loads(path.read_text(encoding='utf-8'))
+          config['productName'] = 'WIE Zenonia LGT Test v3'
+          config['version'] = '0.1.3'
+          config['identifier'] = 'net.dlunch.wie.zenonia.test.v3'
+          for window in config.get('app', {}).get('windows', []):
+              window['title'] = 'WIE Zenonia LGT Test v3'
+          path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print('Applied unique Tauri product name and identifier for v3')
+          PY
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -152,11 +203,11 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $installer = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer was not produced" }
-          Copy-Item $installer.FullName "dist/WIE-Zenonia-LGT-Test-v2-windows-x86_64-unsigned-setup.exe"
+          Copy-Item $installer.FullName "dist/WIE-Zenonia-LGT-Test-v3-windows-x86_64-unsigned-setup.exe"
 
       - name: Upload Windows test build
         uses: actions/upload-artifact@v7
         with:
-          name: WIE-Zenonia-LGT-Test-v2-Windows
+          name: WIE-Zenonia-LGT-Test-v3-Windows
           path: dist/*
           if-no-files-found: error

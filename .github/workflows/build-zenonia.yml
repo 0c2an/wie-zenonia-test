@@ -1,23 +1,75 @@
-name: Build WIE Zenonia LGT Test v4
+name: WIE Managed Build
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - "patches/current.py"
+  workflow_dispatch:
+    inputs:
+      build_tag:
+        description: "빌드 이름 (예: zenonia-v5)"
+        required: false
+        default: "zenonia-managed"
+        type: string
+      storage_tag:
+        description: "저장공간 이름. 라이브러리를 유지하려면 managed 그대로"
+        required: false
+        default: "managed"
+        type: string
+      upstream_ref:
+        description: "WIE upstream commit/ref"
+        required: false
+        default: "47b41b55f5fcc3def406a51abe567ce71f5025d2"
+        type: string
+      patch_gz_b64:
+        description: "새 패치 payload. 비우면 저장된 패치 또는 내장 v4-fixed 사용"
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  DEFAULT_WIE_REF: 47b41b55f5fcc3def406a51abe567ce71f5025d2
+  DEFAULT_PATCH_GZ_B64: "H4sIAK3ommoC/71WW0/bMBR+z684yyRItPTKhCAM9gBoQkIaortIAxS5jkO9Jk5kO7QV4r/vOJc27Sh0VFoeWsf+fC6fv3OcSKYJZESPYj4EnmSp1HCFr5alHigcF2PHnnDWiu91R0nakbnQPGEdXA94qNpS2a6l2VQjGufakpEwMO8OEzQNubg/tnMdtQ4QZqVxiDAb8BmwmFF9zWgqzVx32js89G6FWfouxgflFOl6tiXYxGy6FXb7d8qFc2MZ0HojtrcAdDpwPs2YxIiFJjFcfvkGIdFkSBQDFacaen3IFQthOINfTKSCE+i1myYuudJn1RZVOaFLTpbj9aw71+IRmFwFOuACDB1+gZeEo+PBTGmWnE+5duzTNK+AERchMJEnuEUxqXkqIMOE9YJg84cMZzGhzEEHHiA5HvSWqa2fgg44PjE0Rb7fJKtiuoEk3QXSJPQy8Zu4aFLUxNMFfonbdRv+jmw7igc/TiEhWYbSfAvTRuQTyTUrVW5+PHhG6xOe8RcryAACulRAZmrjCjLPz4uri9PBA70Il8k3jNU6931VrASyWGpjnmkwTMOZ4zZk0LRUCrppgU3xpFRQTyzZeFUo2wa5qoumvZXqbBqMcWkesdrY4j8mv50WQ66w+9LRNiW/SjtRM0EhEpCL8UcnoKkoAoKdJNcQzkSZ7Wk57QHp+pDv9XHQqwf9erBXDFxoncA1U3msP+HrCTxW/O2aHy0JRY36/oRI8c6xlc6HpetHNP1++uTBI5quBv16sGcGru0e7VZn0TyTr2On69YTTyXHa0S2nO3/TpatXi7Yr/ohRKrFRZSCGvHkbTQU3mKmi8sZ8x7anUt7DmouBpmWCKgyb5M4TmkgycRxzGo7ZsJx4QMKBogqEvx81KS6bGUij2PsOTLhgmgWBkpLTDMYzjRTNane3F05ahiyV+Iyya+Nq7e/EkINKUMpfdYWPNi56eYHR9Dbv3s28nsm8AToIsjFzjrcNYGiyGrsqtbeXM9GAkaInVIHphY2KeWi729yqZivLjpidLzB11Z5v1TgV28WokwDAvvZzx3b0DD3Pce+dJuv2bJ17y7sLlKbG96gEle3ZqhxPMIzFhGs9vnnn9lcNuUHtBhxSsq+bDyFtvsHSA6CYDMLAAA="
 
 jobs:
   web:
-    name: Build web frontend
+    name: Build managed WASM frontend
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve inputs
+        id: cfg
+        shell: bash
+        env:
+          INPUT_BUILD_TAG: ${{ inputs.build_tag }}
+          INPUT_STORAGE_TAG: ${{ inputs.storage_tag }}
+          INPUT_UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          BUILD_TAG="${INPUT_BUILD_TAG:-zenonia-v4-fixed}"
+          STORAGE_TAG="${INPUT_STORAGE_TAG:-managed}"
+          UPSTREAM_REF="${INPUT_UPSTREAM_REF:-$DEFAULT_WIE_REF}"
+          BUILD_TAG="$(printf '%s' "$BUILD_TAG" | tr -cd 'A-Za-z0-9._-' | cut -c1-40)"
+          STORAGE_TAG="$(printf '%s' "$STORAGE_TAG" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"
+          [ -n "$BUILD_TAG" ] || BUILD_TAG="managed"
+          [ -n "$STORAGE_TAG" ] || STORAGE_TAG="managed"
+          echo "build_tag=$BUILD_TAG" >> "$GITHUB_OUTPUT"
+          echo "storage_tag=$STORAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_ref=$UPSTREAM_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout manager repository
+        uses: actions/checkout@v7
+        with:
+          path: control
+          persist-credentials: true
+
       - name: Checkout official WIE source
         uses: actions/checkout@v7
         with:
           repository: dlunch/wie
-          ref: 47b41b55f5fcc3def406a51abe567ce71f5025d2
+          ref: ${{ steps.cfg.outputs.upstream_ref }}
+          path: src
           persist-credentials: false
           submodules: recursive
 
@@ -34,222 +86,159 @@ jobs:
         with:
           tool: wasm-pack
 
+      - name: Prepare and persist managed patch
+        shell: bash
+        env:
+          PATCH_GZ_B64: ${{ inputs.patch_gz_b64 }}
+        run: |
+          mkdir -p control/patches
+          if [ -n "$PATCH_GZ_B64" ]; then
+            printf '%s' "$PATCH_GZ_B64" | base64 -d | gzip -d > control/patches/current.py
+            python -m py_compile control/patches/current.py
+            cd control
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add patches/current.py
+            if ! git diff --cached --quiet; then
+              git commit -m "Update managed WIE patch [skip ci]"
+              git push origin HEAD:main
+            fi
+            cd ..
+            echo "Saved new patch as patches/current.py"
+          elif [ ! -f control/patches/current.py ]; then
+            printf '%s' "$DEFAULT_PATCH_GZ_B64" | base64 -d | gzip -d > control/patches/current.py
+            python -m py_compile control/patches/current.py
+            echo "Using built-in v4-fixed patch"
+          else
+            python -m py_compile control/patches/current.py
+            echo "Using persisted patches/current.py"
+          fi
 
-      - name: Isolate v4 web storage
+      - name: Isolate managed storage
+        shell: bash
+        env:
+          STORAGE_TAG: ${{ steps.cfg.outputs.storage_tag }}
+        working-directory: src
         run: |
           python - <<'PY'
           from pathlib import Path
-
+          import os
+          tag = os.environ["STORAGE_TAG"]
           replacements = {
-              Path('wie-web/src/ts/app_library_store.ts'): [
-                  ('indexedDB.open("wie_app_library", 1)', 'indexedDB.open("wie_zenonia_v4_app_library", 1)'),
+              Path("wie-web/src/ts/app_library_store.ts"): [
+                  ('indexedDB.open("wie_app_library", 1)', f'indexedDB.open("wie_{tag}_app_library", 1)'),
               ],
-              Path('wie-web/src/ts/library.ts'): [
-                  ('const WELCOME_STORAGE_KEY = "wie_welcome_seen";', 'const WELCOME_STORAGE_KEY = "wie_zenonia_v4_welcome_seen";'),
+              Path("wie-web/src/ts/library.ts"): [
+                  ('const WELCOME_STORAGE_KEY = "wie_welcome_seen";', f'const WELCOME_STORAGE_KEY = "wie_{tag}_welcome_seen";'),
               ],
-              Path('wie-web/src/rust/filesystem.rs'): [
-                  ('const DB_NAME: &str = "wie_filesystem";', 'const DB_NAME: &str = "wie_zenonia_v4_filesystem";'),
+              Path("wie-web/src/rust/filesystem.rs"): [
+                  ('const DB_NAME: &str = "wie_filesystem";', f'const DB_NAME: &str = "wie_{tag}_filesystem";'),
               ],
-              Path('wie-web/src/rust/database.rs'): [
-                  ('format!("wie_{app_id}")', 'format!("wie_zenonia_v4_{app_id}")'),
+              Path("wie-web/src/rust/database.rs"): [
+                  ('format!("wie_{app_id}")', f'format!("wie_{tag}_{{app_id}}")'),
               ],
           }
-
           for path, items in replacements.items():
-              data = path.read_text(encoding='utf-8')
+              data = path.read_text(encoding="utf-8")
               for old, new in items:
                   if old not in data:
-                      raise SystemExit(f'Could not find storage isolation target in {path}: {old}')
-                  data = data.replace(old, new)
-              path.write_text(data, encoding='utf-8')
-
-          print('Isolated v4 app library, icons/archive storage, filesystem, save DBs, and welcome state')
+                      raise SystemExit(f"Storage isolation target not found in {path}: {old}")
+                  data = data.replace(old, new, 1)
+              path.write_text(data, encoding="utf-8")
+          print(f"Storage namespace: {tag}")
           PY
 
-      - name: Apply LGT compatibility patches to WASM runtime
+      - name: Apply and verify managed patch
         shell: bash
+        working-directory: src
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          svc = Path('wie-lgt/src/runtime/svc_ids.rs')
-          text = svc.read_text(encoding='utf-8')
-          old = '    SelectRecord = 0x199,\n    Unk8 = 0x1a0,'
-          new = '''    SelectRecord = 0x199,
-              // Experimental LGT database slot 12 used by Zenonia 1.
-              ListDatabases = 0x19c,
-              Unk8 = 0x1a0,'''
-          if old not in text:
-              raise SystemExit('Could not find enum insertion point')
-          text = text.replace(old, new, 1)
-
-          old = '            0x199 => Self::SelectRecord,\n            0x1a0 => Self::Unk8,'
-          new = '''            0x199 => Self::SelectRecord,
-                      0x19c => Self::ListDatabases,
-                      0x1a0 => Self::Unk8,'''
-          if old not in text:
-              raise SystemExit('Could not find SVC mapping insertion point')
-          svc.write_text(text.replace(old, new, 1), encoding='utf-8')
-
-          wipi = Path('wie-lgt/src/runtime/wipi_c.rs')
-          text = wipi.read_text(encoding='utf-8')
-          old = '        WIPICSvcId::SelectRecord => database::select_record.into_body(),\n        WIPICSvcId::Unk8 => database::exists_database.into_body(),'
-          new = '''        WIPICSvcId::SelectRecord => database::select_record.into_body(),
-                  WIPICSvcId::ListDatabases => database::list_databases.into_body(),
-                  WIPICSvcId::Unk8 => database::exists_database.into_body(),'''
-          if old not in text:
-              raise SystemExit('Could not find dispatch insertion point')
-          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
-          print('Applied LGT SVC 412 (0x19c) experimental patch')
-
-          # Zenonia proceeds past SVC 412, then reaches LGT SVC 0x12d.
-          # In upstream WIE this is `unk4` and currently returns 0.
-          # Zenonia treats the result as a pointer to a structure whose first
-          # field is a C-string pointer, then calls strstr(value, "/L")/"/S".
-          # Return a small, valid compatibility structure for the next test.
-          old = '''async fn unk4(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-              tracing::warn!("stub unk4({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-              Ok(0)
-          }'''
-          new = '''async fn unk4(context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-              tracing::warn!("experimental LGT 0x12d fs-info shim({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-              let path = b"/L";
-              let path_ptr = context.alloc_raw((path.len() + 1) as u32)?;
-              write_null_terminated_string_bytes(context, path_ptr, path)?;
-
-              // Zenonia currently reads the first word as a char*.
-              // Leave a little zeroed room for adjacent fields while the ABI
-              // is still being reverse engineered.
-              let info_ptr = context.alloc_raw(16)?;
-              context.write_bytes(info_ptr, &[0u8; 16])?;
-              write_generic(context, info_ptr, path_ptr)?;
-
-              Ok(info_ptr)
-          }'''
-          if old not in text:
-              raise SystemExit('Could not find LGT unk4/0x12d stub')
-          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
-          print('Applied experimental LGT SVC 0x12d compatibility shim')
-          PY
-
-
-      - name: Verify WASM LGT patches
-        run: |
-          grep -n "ListDatabases = 0x19c" wie-lgt/src/runtime/svc_ids.rs
-          grep -n "experimental LGT 0x12d fs-info shim" wie-lgt/src/runtime/wipi_c.rs
+          python ../control/patches/current.py
+          git diff --check
+          git diff --binary > ../managed.patch
+          test -s ../managed.patch
+          git status --short
 
       - name: Build production frontend
+        working-directory: src
         run: |
           npm ci
           npm run build:prod
 
-      - name: Upload web frontend
+      - name: Upload exact web frontend
         uses: actions/upload-artifact@v7
         with:
-          name: web-frontend
-          path: wie-web/dist
+          name: web-frontend-${{ github.run_id }}
+          path: src/wie-web/dist
+          if-no-files-found: error
+
+      - name: Upload exact source patch
+        uses: actions/upload-artifact@v7
+        with:
+          name: managed-source-patch-${{ github.run_id }}
+          path: managed.patch
           if-no-files-found: error
 
   windows:
-    name: Build patched Windows x64 installer
+    name: Build managed Windows x64 installer
     needs: web
     runs-on: windows-latest
     steps:
-      - name: Checkout official WIE source
+      - name: Resolve inputs
+        id: cfg
+        shell: bash
+        env:
+          INPUT_BUILD_TAG: ${{ inputs.build_tag }}
+          INPUT_UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          BUILD_TAG="${INPUT_BUILD_TAG:-zenonia-v4-fixed}"
+          UPSTREAM_REF="${INPUT_UPSTREAM_REF:-$DEFAULT_WIE_REF}"
+          BUILD_TAG="$(printf '%s' "$BUILD_TAG" | tr -cd 'A-Za-z0-9._-' | cut -c1-40)"
+          [ -n "$BUILD_TAG" ] || BUILD_TAG="managed"
+          echo "build_tag=$BUILD_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_ref=$UPSTREAM_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact official WIE source
         uses: actions/checkout@v7
         with:
           repository: dlunch/wie
-          ref: 47b41b55f5fcc3def406a51abe567ce71f5025d2
+          ref: ${{ steps.cfg.outputs.upstream_ref }}
+          path: src
           persist-credentials: false
           submodules: recursive
 
-      - name: Apply LGT compatibility patches to native source
+      - name: Download exact source patch
+        uses: actions/download-artifact@v8
+        with:
+          name: managed-source-patch-${{ github.run_id }}
+          path: managed-patch
+
+      - name: Apply exact source patch
         shell: bash
+        working-directory: src
+        run: |
+          git apply --check ../managed-patch/managed.patch
+          git apply ../managed-patch/managed.patch
+          git diff --check
+
+      - name: Isolate managed Windows identity
+        shell: bash
+        env:
+          BUILD_TAG: ${{ steps.cfg.outputs.build_tag }}
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          svc = Path('wie-lgt/src/runtime/svc_ids.rs')
-          text = svc.read_text(encoding='utf-8')
-          old = '    SelectRecord = 0x199,\n    Unk8 = 0x1a0,'
-          new = '''    SelectRecord = 0x199,
-              // Experimental LGT database slot 12 used by Zenonia 1.
-              ListDatabases = 0x19c,
-              Unk8 = 0x1a0,'''
-          if old not in text:
-              raise SystemExit('Could not find enum insertion point')
-          text = text.replace(old, new, 1)
-
-          old = '            0x199 => Self::SelectRecord,\n            0x1a0 => Self::Unk8,'
-          new = '''            0x199 => Self::SelectRecord,
-                      0x19c => Self::ListDatabases,
-                      0x1a0 => Self::Unk8,'''
-          if old not in text:
-              raise SystemExit('Could not find SVC mapping insertion point')
-          svc.write_text(text.replace(old, new, 1), encoding='utf-8')
-
-          wipi = Path('wie-lgt/src/runtime/wipi_c.rs')
-          text = wipi.read_text(encoding='utf-8')
-          old = '        WIPICSvcId::SelectRecord => database::select_record.into_body(),\n        WIPICSvcId::Unk8 => database::exists_database.into_body(),'
-          new = '''        WIPICSvcId::SelectRecord => database::select_record.into_body(),
-                  WIPICSvcId::ListDatabases => database::list_databases.into_body(),
-                  WIPICSvcId::Unk8 => database::exists_database.into_body(),'''
-          if old not in text:
-              raise SystemExit('Could not find dispatch insertion point')
-          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
-          print('Applied LGT SVC 412 (0x19c) experimental patch')
-
-          # Zenonia proceeds past SVC 412, then reaches LGT SVC 0x12d.
-          # In upstream WIE this is `unk4` and currently returns 0.
-          # Zenonia treats the result as a pointer to a structure whose first
-          # field is a C-string pointer, then calls strstr(value, "/L")/"/S".
-          # Return a small, valid compatibility structure for the next test.
-          old = '''async fn unk4(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-              tracing::warn!("stub unk4({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-              Ok(0)
-          }'''
-          new = '''async fn unk4(context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-              tracing::warn!("experimental LGT 0x12d fs-info shim({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-              let path = b"/L";
-              let path_ptr = context.alloc_raw((path.len() + 1) as u32)?;
-              write_null_terminated_string_bytes(context, path_ptr, path)?;
-
-              // Zenonia currently reads the first word as a char*.
-              // Leave a little zeroed room for adjacent fields while the ABI
-              // is still being reverse engineered.
-              let info_ptr = context.alloc_raw(16)?;
-              context.write_bytes(info_ptr, &[0u8; 16])?;
-              write_generic(context, info_ptr, path_ptr)?;
-
-              Ok(info_ptr)
-          }'''
-          if old not in text:
-              raise SystemExit('Could not find LGT unk4/0x12d stub')
-          wipi.write_text(text.replace(old, new, 1), encoding='utf-8')
-          print('Applied experimental LGT SVC 0x12d compatibility shim')
-          PY
-
-
-      - name: Isolate v4 Windows app identity
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import json
-
-          path = Path('wie-app/tauri.conf.json')
-          config = json.loads(path.read_text(encoding='utf-8'))
-          config['productName'] = 'WIE Zenonia LGT Test v4'
-          config['version'] = '0.1.3'
-          config['identifier'] = 'net.dlunch.wie.zenonia.test.v4'
-          for window in config.get('app', {}).get('windows', []):
-              window['title'] = 'WIE Zenonia LGT Test v4'
-          path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-          print('Applied unique Tauri product name and identifier for v4')
+          import json, os
+          path = Path("src/wie-app/tauri.conf.json")
+          config = json.loads(path.read_text(encoding="utf-8"))
+          run_number = int(os.environ.get("GITHUB_RUN_NUMBER", "0"))
+          build_tag = os.environ["BUILD_TAG"]
+          config["productName"] = "WIE Managed Test"
+          config["version"] = f"0.3.{run_number}"
+          config["identifier"] = "net.dlunch.wie.managed"
+          for window in config.get("app", {}).get("windows", []):
+              window["title"] = f"WIE Managed Test - {build_tag}"
+          path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print(f"Windows identity ready: {build_tag}, version 0.3.{run_number}")
           PY
 
       - name: Set up Rust
@@ -257,31 +246,33 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Download web frontend
+      - name: Download exact web frontend
         uses: actions/download-artifact@v8
         with:
-          name: web-frontend
-          path: wie-web/dist
+          name: web-frontend-${{ github.run_id }}
+          path: src/wie-web/dist
 
       - name: Build unsigned Windows installer
         uses: tauri-apps/tauri-action@v1
         with:
-          projectPath: wie-app
+          projectPath: src/wie-app
           args: >-
             --config '{"build":{"beforeBuildCommand":""}}'
             --ci --target x86_64-pc-windows-msvc --bundles nsis --no-sign
 
       - name: Package installer
         shell: pwsh
+        env:
+          BUILD_TAG: ${{ steps.cfg.outputs.build_tag }}
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $installer = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $installer = Get-ChildItem src/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer was not produced" }
-          Copy-Item $installer.FullName "dist/WIE-Zenonia-LGT-Test-v4-windows-x86_64-unsigned-setup.exe"
+          Copy-Item $installer.FullName "dist/WIE-Managed-$env:BUILD_TAG-windows-x86_64-unsigned-setup.exe"
 
-      - name: Upload Windows test build
+      - name: Upload Windows build
         uses: actions/upload-artifact@v7
         with:
-          name: WIE-Zenonia-LGT-Test-v4-Windows
+          name: WIE-Managed-${{ steps.cfg.outputs.build_tag }}-Windows
           path: dist/*
           if-no-files-found: error
